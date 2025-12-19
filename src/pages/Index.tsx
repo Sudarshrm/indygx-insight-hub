@@ -1,6 +1,5 @@
-import { useState, useMemo } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { mockOrganizations, mockStats } from '@/data/mockData';
 import { Organization, EcosystemType, ecosystemTypeLabels } from '@/types/ecosystem';
 import { StatCard } from '@/components/dashboard/StatCard';
 import { OrganizationCard } from '@/components/dashboard/OrganizationCard';
@@ -14,21 +13,74 @@ import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Checkbox } from '@/components/ui/checkbox';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { calculateEcosystemStats, getAllCompanies, subscribeToCompanyChanges } from '@/services/data';
 import { 
   Search, Building2, Users, DollarSign, TrendingUp, 
   BarChart3, GitCompare, X, Layers
 } from 'lucide-react';
 
+const defaultTypeCounts: Record<EcosystemType, number> = {
+  accelerator: 0,
+  investor: 0,
+  funding: 0,
+  government: 0,
+  coworking: 0,
+  incubator: 0,
+};
+
 const Index = () => {
+  const queryClient = useQueryClient();
   const [selectedType, setSelectedType] = useState<EcosystemType | 'all'>('all');
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedOrg, setSelectedOrg] = useState<Organization | null>(null);
   const [compareList, setCompareList] = useState<string[]>([]);
   const [showComparison, setShowComparison] = useState(false);
 
+  const { data: organizations = [], isLoading, isError, error } = useQuery({
+    queryKey: ['organizations'],
+    queryFn: getAllCompanies,
+    staleTime: 30000,
+    refetchOnWindowFocus: false,
+  });
+
+  const errorMessage = useMemo(() => {
+    if (!error) return '';
+    if (error instanceof Error) return error.message;
+    if (typeof error === 'string') return error;
+    return 'Unable to load data from Supabase';
+  }, [error]);
+
+  useEffect(() => {
+    const cleanup = subscribeToCompanyChanges(() => {
+      queryClient.invalidateQueries({ queryKey: ['organizations'] });
+    });
+
+    return cleanup;
+  }, [queryClient]);
+
+  useEffect(() => {
+    if (!selectedOrg) return;
+    const refreshed = organizations.find((org) => org.id === selectedOrg.id);
+    if (!refreshed) {
+      setSelectedOrg(null);
+    } else {
+      setSelectedOrg(refreshed);
+    }
+  }, [organizations, selectedOrg]);
+
+  useEffect(() => {
+    if (!compareList.length) return;
+    setCompareList((prev) => prev.filter((id) => organizations.some((org) => org.id === id)));
+  }, [organizations]);
+
+  const stats = useMemo(() => (
+    organizations.length ? calculateEcosystemStats(organizations) : null
+  ), [organizations]);
+
   // Filter organizations
   const filteredOrganizations = useMemo(() => {
-    return mockOrganizations.filter((org) => {
+    return organizations.filter((org) => {
       const matchesType = selectedType === 'all' || org.type === selectedType;
       const matchesSearch = searchQuery === '' || 
         org.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
@@ -36,7 +88,7 @@ const Index = () => {
         org.tags.some(tag => tag.toLowerCase().includes(searchQuery.toLowerCase()));
       return matchesType && matchesSearch;
     });
-  }, [selectedType, searchQuery]);
+  }, [organizations, searchQuery, selectedType]);
 
   // Chart data
   const typeDistributionData = useMemo(() => {
@@ -48,36 +100,45 @@ const Index = () => {
       coworking: 'hsl(262, 52%, 47%)',
       incubator: 'hsl(12, 76%, 61%)',
     };
-    return Object.entries(mockStats.byType).map(([type, count]) => ({
+    const dataSource = stats?.byType ?? defaultTypeCounts;
+    return Object.entries(dataSource).map(([type, count]) => ({
       name: ecosystemTypeLabels[type as EcosystemType],
       value: count,
       color: colors[type as EcosystemType],
     }));
-  }, []);
+  }, [stats?.byType]);
 
   const stageDistributionData = useMemo(() => {
     const stageNames = { idea: 'Idea', early: 'Early', growth: 'Growth', scale: 'Scale' };
-    return Object.entries(mockStats.byStage).map(([stage, count]) => ({
+    if (!stats) return [];
+    return Object.entries(stats.byStage).map(([stage, count]) => ({
       name: stageNames[stage as keyof typeof stageNames],
       value: count,
     }));
-  }, []);
+  }, [stats]);
 
   const topSectorsData = useMemo(() => {
-    return Object.entries(mockStats.bySector)
+    if (!stats) return [];
+    return Object.entries(stats.bySector)
       .sort((a, b) => b[1] - a[1])
       .slice(0, 8)
       .map(([sector, count]) => ({ name: sector, value: count }));
-  }, []);
+  }, [stats]);
 
-  const growthTrendData = [
-    { name: '2019', value: 45 },
-    { name: '2020', value: 62 },
-    { name: '2021', value: 78 },
-    { name: '2022', value: 89 },
-    { name: '2023', value: 98 },
-    { name: '2024', value: 112 },
-  ];
+  const growthTrendData = useMemo(() => {
+    const counts: Record<number, number> = {};
+    organizations.forEach((org) => {
+      if (!org.yearFounded) return;
+      counts[org.yearFounded] = (counts[org.yearFounded] || 0) + 1;
+    });
+
+    const years = Object.keys(counts)
+      .map(Number)
+      .sort((a, b) => a - b)
+      .slice(-6);
+
+    return years.map((year) => ({ name: year.toString(), value: counts[year] }));
+  }, [organizations]);
 
   const handleCompareToggle = (orgId: string) => {
     setCompareList(prev => 
@@ -90,8 +151,8 @@ const Index = () => {
   };
 
   const compareOrganizations = useMemo(() => 
-    mockOrganizations.filter(org => compareList.includes(org.id)),
-    [compareList]
+    organizations.filter(org => compareList.includes(org.id)),
+    [compareList, organizations]
   );
 
   const formatCurrency = (num: number) => {
@@ -179,10 +240,16 @@ const Index = () => {
           </p>
         </motion.section>
 
+        {isError && (
+          <div className="rounded-lg border border-destructive/40 bg-destructive/10 text-destructive px-4 py-3">
+            Failed to load data from Supabase: {errorMessage}
+          </div>
+        )}
+
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
           <StatCard
             title="Ecosystem Players"
-            value={mockStats.totalPlayers}
+            value={stats?.totalPlayers ?? (isLoading ? 'Loading…' : 0)}
             subtitle="Active organizations"
             icon={Building2}
             trend={{ value: 15, isPositive: true }}
@@ -190,7 +257,7 @@ const Index = () => {
           />
           <StatCard
             title="Startups Supported"
-            value={mockStats.totalStartupsSupported.toLocaleString()}
+            value={stats ? stats.totalStartupsSupported.toLocaleString() : isLoading ? 'Loading…' : 0}
             subtitle="Across all players"
             icon={Users}
             trend={{ value: 23, isPositive: true }}
@@ -198,7 +265,7 @@ const Index = () => {
           />
           <StatCard
             title="Capital Deployed"
-            value={formatCurrency(mockStats.totalCapitalDeployed)}
+            value={formatCurrency(stats?.totalCapitalDeployed || 0)}
             subtitle="Total ecosystem funding"
             icon={DollarSign}
             trend={{ value: 18, isPositive: true }}
@@ -206,7 +273,7 @@ const Index = () => {
           />
           <StatCard
             title="Avg Portfolio Size"
-            value={mockStats.averagePortfolioSize}
+            value={stats?.averagePortfolioSize ?? (isLoading ? 'Loading…' : 0)}
             subtitle="Per organization"
             icon={TrendingUp}
             delay={0.25}
@@ -254,7 +321,7 @@ const Index = () => {
           <EcosystemTypeFilter
             selectedType={selectedType}
             onTypeChange={setSelectedType}
-            counts={mockStats.byType}
+            counts={stats?.byType ?? defaultTypeCounts}
           />
         </section>
 
@@ -312,7 +379,7 @@ const Index = () => {
               <Building2 className="h-12 w-12 text-muted-foreground mx-auto mb-4" />
               <h3 className="text-lg font-semibold text-foreground mb-2">No organizations found</h3>
               <p className="text-muted-foreground">
-                Try adjusting your search or filter criteria
+                {isLoading ? 'Loading organizations from Supabase…' : 'Try adjusting your search or filter criteria'}
               </p>
             </div>
           )}
