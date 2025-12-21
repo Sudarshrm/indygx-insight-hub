@@ -55,14 +55,16 @@ const splitCSV = (value?: string | null): string[] => {
     .filter(Boolean);
 };
 
-const deriveType = (nature?: string | null): EcosystemType => {
-  const normalized = (nature || '').toLowerCase();
-  if (normalized.includes('invest')) return 'investor';
-  if (normalized.includes('fund')) return 'funding';
-  if (normalized.includes('government')) return 'government';
-  if (normalized.includes('cowork')) return 'coworking';
+const deriveType = (nature?: string | null, industry?: string | null): EcosystemType => {
+  const normalized = `${nature || ''} ${industry || ''}`.toLowerCase();
+  if (normalized.includes('invest') || normalized.includes('vc') || normalized.includes('venture capital')) return 'investor';
+  if (normalized.includes('fund') && !normalized.includes('founder')) return 'funding';
+  if (normalized.includes('government') || normalized.includes('govt') || normalized.includes('public sector')) return 'government';
+  if (normalized.includes('cowork') || normalized.includes('co-work') || normalized.includes('workspace')) return 'coworking';
   if (normalized.includes('incubat')) return 'incubator';
   if (normalized.includes('accelerat')) return 'accelerator';
+  // Default based on services
+  if (normalized.includes('office') || normalized.includes('space')) return 'coworking';
   return 'accelerator';
 };
 
@@ -70,6 +72,24 @@ const parseYear = (year?: string | null): number => {
   if (!year) return 0;
   const parsed = parseInt(year, 10);
   return Number.isNaN(parsed) ? 0 : parsed;
+};
+
+const parseNumber = (value?: string | null): number => {
+  if (!value) return 0;
+  const cleaned = value.replace(/[^0-9.-]/g, '');
+  const parsed = parseFloat(cleaned);
+  return Number.isNaN(parsed) ? 0 : parsed;
+};
+
+const parseFinancialAmount = (value?: string | null): number | undefined => {
+  if (!value) return undefined;
+  const cleaned = value.toLowerCase().replace(/[^0-9.kmb]/g, '');
+  let multiplier = 1;
+  if (cleaned.includes('k')) multiplier = 1000;
+  else if (cleaned.includes('m')) multiplier = 1000000;
+  else if (cleaned.includes('b')) multiplier = 1000000000;
+  const num = parseFloat(cleaned.replace(/[kmb]/g, ''));
+  return Number.isNaN(num) ? undefined : num * multiplier;
 };
 
 const mapSupabaseCompanyToOrganization = (row: CompanyPrimaryRow): Organization => {
@@ -88,19 +108,26 @@ const mapSupabaseCompanyToOrganization = (row: CompanyPrimaryRow): Organization 
   const supportTypes = splitCSV(row.services_offerings);
   const capitalTypes: CapitalType[] = [];
 
+  // Extract metrics from available fields
+  const startupsSupported = parseNumber(row.employee_size) || parseNumber(secondary.processing_time) || 0;
+  const capitalDeployed = parseFinancialAmount(financials.total_capital_raised_to_date) 
+    || parseFinancialAmount(financials.annual_revenues)
+    || parseFinancialAmount(financials.company_valuation);
+  const portfolioSize = parseNumber(secondary.success_rate_portfolio_exits_graduations);
+
   return {
     id: String(row.company_id),
     name: row.company_name ?? 'Unknown Organization',
-    type: deriveType(row.nature_of_company),
+    type: deriveType(row.nature_of_company, row.industry_segment),
     tagline: row.core_value_proposition ?? row.industry_segment ?? '',
     description: row.services_offerings ?? row.core_value_proposition ?? '',
     yearFounded,
     headquarters: row.countries_operating_in ?? '—',
     website: row.website_url ?? '#',
     linkedin: row.linkedin_profile_url ?? undefined,
-    startupsSupported: 0,
-    capitalDeployed: undefined,
-    portfolioSize: undefined,
+    startupsSupported,
+    capitalDeployed,
+    portfolioSize: portfolioSize || undefined,
     investmentRange: undefined,
     programDuration: undefined,
     yearsActive,
